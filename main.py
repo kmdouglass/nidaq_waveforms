@@ -1,7 +1,20 @@
+import time
+
 import matplotlib.pyplot as plt
 import nidaqmx
 from nidaqmx.constants import AcquisitionType, Edge, RegenerationMode
 import numpy as np
+
+
+# Script configuration
+MOCK_DAQ = True  # Set to True to use mock DAQ for testing without hardware
+
+# Hardware configuration
+COUNTER = "Dev1/ctr1"
+SOURCE_AO = "Dev1/Ctr1InternalOutput"
+TRIGGER_COUNTER = "Dev1/PFI3"
+WAVEFORM_MIN_V = -10.0
+WAVEFORM_MAX_V = 10.0
 
 
 def main(
@@ -11,6 +24,7 @@ def main(
     exposure_pp_V: float = 0.46,
     waveform_offset_V: float = - 0.075,
     rate_Hz: int = 50000,
+    task_class=nidaqmx.Task,
 ):
     """Waveform generation for microscope device synchronization.
 
@@ -61,15 +75,21 @@ def main(
     #==============================================================================================
     # Calculate the waveform samples (must be an even number of samples)
     num_waveform_samples = int(round((waveform_period_ms / 1000.0) * rate_Hz / 2.0) * 2.0)
-    num_clock_samples = num_waveform_samples // 2
+    num_counter_samples = num_waveform_samples // 2
 
     parking_time_samples = int(round((parking_time_ms / 1000.0) * rate_Hz))
-    ramp_time_samples = num_clock_samples - parking_time_samples
+    ramp_time_samples = num_counter_samples - parking_time_samples
     waveform_offset_samples = int(round((waveform_offset_ms / 1000.0) * rate_Hz))
 
     waveform_amplitude_V = waveform_pp_V / 2.0
     waveform_high_V = waveform_offset_V + waveform_amplitude_V
     waveform_low_V = waveform_offset_V - waveform_amplitude_V
+    
+    if waveform_high_V > WAVEFORM_MAX_V or waveform_low_V < WAVEFORM_MIN_V:
+        raise ValueError(
+            f"Waveform voltage out of range: must be between {WAVEFORM_MIN_V} V and {WAVEFORM_MAX_V} V."
+        )
+    
     waveform_samples = np.zeros(num_waveform_samples, dtype=np.float32)
     
     # Ramp up
@@ -85,7 +105,7 @@ def main(
 
     # Ramp down
     waveform_samples[
-        num_clock_samples:num_clock_samples + ramp_time_samples
+        num_counter_samples:num_counter_samples + ramp_time_samples
     ] = np.linspace(
         waveform_high_V,
         waveform_low_V,
@@ -94,10 +114,56 @@ def main(
     )
 
     # Park low
-    waveform_samples[num_clock_samples + ramp_time_samples:] = waveform_low_V
+    waveform_samples[num_counter_samples + ramp_time_samples:] = waveform_low_V
 
     # Apply exposure offset
     waveform_samples = np.roll(waveform_samples, waveform_offset_samples)
+
+    #==============================================================================================
+    # Configure and execute waveform on the DAQ device
+    with task_class("CounterTask") as counter_task, task_class("AnalogOutputTask") as ao_task:
+        #==========================================================================================
+        # Counter config
+        counter_task.co_channels.add_co_pulse_chan_freq(
+            counter=COUNTER,
+            freq=rate_Hz,
+            duty_cycle=0.5
+        )
+        counter_task.timing.cfg_implicit_timing(
+            sample_mode=AcquisitionType.FINITE,
+            samps_per_chan=num_counter_samples
+        )
+        counter_task.triggers.start_trigger.cfg_dig_edge_start_trig(
+            trigger_source=TRIGGER_COUNTER,
+            trigger_edge=Edge.RISING
+        )
+        counter_task.triggers.start_trigger.retriggerable = True
+
+        #==========================================================================================
+        # Analog output config
+        ao_task.ao_channels.add_ao_voltage_chan(
+            "Dev1/ao0",
+            min_val=WAVEFORM_MIN_V,
+            max_val=WAVEFORM_MAX_V
+        )
+        ao_task.timing.cfg_samp_clk_timing(
+            rate=rate_Hz,
+            source=SOURCE_AO,
+            sample_mode=AcquisitionType.CONTINUOUS
+        )
+        ao_task.out_stream.regen_mode = RegenerationMode.ALLOW_REGENERATION
+        ao_task.write(waveform_samples, auto_start=False)
+
+        print("Press Ctrl+C to stop waveform generation...")
+        try:
+            ao_task.start()  # Must arm the AO task before the counter task
+            counter_task.start()
+
+            while True:
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            print("Stopping waveform generation...")
+
     
     #==============================================================================================
     # Prepare results and return
@@ -118,6 +184,15 @@ def main(
 
 
 if __name__ == "__main__":
+    if MOCK_DAQ:
+        from unittest.mock import MagicMock
+
+        def make_fake_task(name=""):
+            task = MagicMock()
+            task.__enter__ = MagicMock(return_value=task)
+            task.__exit__ = MagicMock(return_value=False)
+            return task
+        
     frame_interval_ms = 50.0
     readout_time_ms = 22.94
     parking_fraction = 0.8
@@ -132,6 +207,7 @@ if __name__ == "__main__":
         exposure_pp_V=exposure_pp_V,
         waveform_offset_V=waveform_offset_V,
         rate_Hz=rate_Hz,
+        task_class=make_fake_task if MOCK_DAQ else nidaqmx.Task,
     )
 
     # pretty print results
