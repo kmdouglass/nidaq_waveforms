@@ -8,8 +8,8 @@ import numpy as np
 
 
 # Script configuration
-MOCK_DAQ = False  # Set to True to use mock DAQ for testing without hardware
-MAKE_PLOT = False # Set to True to plot the waveform 
+MOCK_DAQ = True  # Set to True to use mock DAQ for testing without hardware
+MAKE_PLOT = True  # Set to True to plot the waveform
 FRAME_INTERVAL_MS = 50.0
 READOUT_TIME_MS = 22.94
 PARKING_FRACTION = 0.8
@@ -187,6 +187,8 @@ def main(
         "waveform_offset_ms": waveform_offset_ms,
         "exposure_start_ms": exposure_start_ms,
         "parking_time_ms": parking_time_ms,
+        "num_counter_samples": num_counter_samples,
+        "rate_Hz": rate_Hz,
     }
     return results
 
@@ -256,6 +258,18 @@ if __name__ == "__main__":
             color="red",
             alpha=0.3,
             label="Readout" if n == 0 else None,
+        )
+
+    # Draw vertical lines for counter pulse cycle boundaries
+    counter_period_ms = results["num_counter_samples"] / results["rate_Hz"] * 1000
+    num_cycles = int(np.ceil(time_ms[-1] / counter_period_ms)) + 1
+    for n in range(num_cycles):
+        ax.axvline(
+            n * counter_period_ms,
+            color="black",
+            linestyle="--",
+            linewidth=1,
+            label="Counter cycle" if n == 0 else None,
         )
 
     ax.set_xlim(0, 2.0 * FRAME_INTERVAL_MS + READOUT_TIME_MS)
