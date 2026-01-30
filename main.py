@@ -8,21 +8,25 @@ import numpy as np
 
 
 # Script configuration
-MOCK_DAQ = True  # Set to True to use mock DAQ for testing without hardware
-MAKE_PLOT = True  # Set to True to plot the waveform
+MOCK_DAQ = False  # Set to True to use mock DAQ for testing without hardware
+MAKE_PLOT = False  # Set to True to plot the waveform
 FRAME_INTERVAL_MS = 50.0
 READOUT_TIME_MS = 22.94
-PARKING_FRACTION = 0.8
+PARKING_FRACTION = 0.2
 EXPOSURE_PP_V = 0.46
 WAVEFORM_OFFSET_V = -0.075
 RATE_HZ = 50000
 
 # Hardware configuration
 COUNTER = "Dev1/ctr1"
+CHANNEL_CAMERA = "Dev1/ao0"
+CHANNEL_GALVO = "Dev1/ao1"
 SOURCE_AO = "/Dev1/Ctr1InternalOutput"
-TRIGGER_COUNTER = "/Dev1/PFI3"
-WAVEFORM_MIN_V = -10.0
-WAVEFORM_MAX_V = 10.0
+COUNTER_TRIGGER = "/Dev1/PFI3"
+CAMERA_WAVEFORM_MIN_V = 0.0
+CAMERA_WAVEFORM_MAX_V = 5.0
+GALVO_WAVEFORM_MIN_V = -10.0
+GALVO_WAVEFORM_MAX_V = 10.0
 
 
 def main(
@@ -85,6 +89,16 @@ def main(
     num_waveform_samples = int(round((waveform_period_ms / 1000.0) * rate_Hz / 2.0) * 2.0)
     num_counter_samples = num_waveform_samples // 2
 
+    # Camera waveform
+    # Pulse high for a 10% frame interval duty cycle, 5% waveform period duty cycle
+    camera_waveform = np.zeros(num_waveform_samples, dtype=np.float32)
+    camera_pulse_width_samples = num_waveform_samples // 20  # 5% of waveform period
+
+    # First pulse at t=0
+    camera_waveform[0:camera_pulse_width_samples] = 5.0
+    camera_waveform[num_counter_samples:num_counter_samples + camera_pulse_width_samples] = 5.0
+
+    # Galvo waveform
     parking_time_samples = int(round((parking_time_ms / 1000.0) * rate_Hz))
     ramp_time_samples = num_counter_samples - parking_time_samples
     waveform_offset_samples = int(round((waveform_offset_ms / 1000.0) * rate_Hz))
@@ -93,15 +107,15 @@ def main(
     waveform_high_V = waveform_offset_V + waveform_amplitude_V
     waveform_low_V = waveform_offset_V - waveform_amplitude_V
     
-    if waveform_high_V > WAVEFORM_MAX_V or waveform_low_V < WAVEFORM_MIN_V:
+    if waveform_high_V > GALVO_WAVEFORM_MAX_V or waveform_low_V < GALVO_WAVEFORM_MIN_V:
         raise ValueError(
-            f"Waveform voltage out of range: must be between {WAVEFORM_MIN_V} V and {WAVEFORM_MAX_V} V."
+            f"Waveform voltage out of range: must be between {GALVO_WAVEFORM_MIN_V} V and {GALVO_WAVEFORM_MAX_V} V."
         )
     
-    waveform_samples = np.zeros(num_waveform_samples, dtype=np.float32)
+    galvo_waveform = np.zeros(num_waveform_samples, dtype=np.float32)
     
     # Ramp up
-    waveform_samples[0:ramp_time_samples] = np.linspace(
+    galvo_waveform[0:ramp_time_samples] = np.linspace(
         waveform_low_V,
         waveform_high_V,
         ramp_time_samples,
@@ -109,10 +123,10 @@ def main(
     )
 
     # Park high
-    waveform_samples[ramp_time_samples:ramp_time_samples + parking_time_samples] = waveform_high_V
+    galvo_waveform[ramp_time_samples:ramp_time_samples + parking_time_samples] = waveform_high_V
 
     # Ramp down
-    waveform_samples[
+    galvo_waveform[
         num_counter_samples:num_counter_samples + ramp_time_samples
     ] = np.linspace(
         waveform_high_V,
@@ -122,10 +136,10 @@ def main(
     )
 
     # Park low
-    waveform_samples[num_counter_samples + ramp_time_samples:] = waveform_low_V
+    galvo_waveform[num_counter_samples + ramp_time_samples:] = waveform_low_V
 
     # Apply exposure offset
-    waveform_samples = np.roll(waveform_samples, waveform_offset_samples)
+    galvo_waveform = np.roll(galvo_waveform, waveform_offset_samples)
 
     #==============================================================================================
     # Configure and execute waveform on the DAQ device
@@ -142,7 +156,7 @@ def main(
             samps_per_chan=num_counter_samples
         )
         counter_task.triggers.start_trigger.cfg_dig_edge_start_trig(
-            trigger_source=TRIGGER_COUNTER,
+            trigger_source=COUNTER_TRIGGER,
             trigger_edge=Edge.RISING
         )
         counter_task.triggers.start_trigger.retriggerable = True
@@ -150,9 +164,14 @@ def main(
         #==========================================================================================
         # Analog output config
         ao_task.ao_channels.add_ao_voltage_chan(
-            "Dev1/ao0",
-            min_val=WAVEFORM_MIN_V,
-            max_val=WAVEFORM_MAX_V
+            CHANNEL_CAMERA,
+            min_val=CAMERA_WAVEFORM_MIN_V,
+            max_val=CAMERA_WAVEFORM_MAX_V
+        )
+        ao_task.ao_channels.add_ao_voltage_chan(
+            CHANNEL_GALVO,
+            min_val=GALVO_WAVEFORM_MIN_V,
+            max_val=GALVO_WAVEFORM_MAX_V
         )
         ao_task.timing.cfg_samp_clk_timing(
             rate=rate_Hz,
@@ -160,11 +179,13 @@ def main(
             sample_mode=AcquisitionType.CONTINUOUS
         )
         ao_task.out_stream.regen_mode = RegenerationMode.ALLOW_REGENERATION
-        ao_task.write(waveform_samples, auto_start=False)
+        ao_waveform_data = np.vstack([camera_waveform, galvo_waveform])
+        ao_task.write(ao_waveform_data, auto_start=False)
 
         print("Press Ctrl+C to stop waveform generation...")
         try:
-            ao_task.start()  # Must arm the AO task before the counter task
+            # Must arm the AO task before the counter task
+            ao_task.start()
             counter_task.start()
 
             while True:
@@ -172,7 +193,6 @@ def main(
         except KeyboardInterrupt:
             print("Stopping waveform generation...")
 
-    
     #==============================================================================================
     # Prepare results and return
     #  `start` refers to a point in time
@@ -181,7 +201,7 @@ def main(
 
     results = {
         "time_ms": t,
-        "waveform_samples_V": waveform_samples,
+        "waveform_samples_V": galvo_waveform,
         "exposure_time_ms": exposure_time_ms,
         "readout_time_ms": readout_time_ms,
         "waveform_offset_ms": waveform_offset_ms,
@@ -233,6 +253,7 @@ if __name__ == "__main__":
         (results["waveform_samples_V"], results["waveform_samples_V"])
     )
 
+
     fig, ax = plt.subplots()
     ax.plot(time_ms, waveform_samples_V, "black")
 
@@ -269,7 +290,7 @@ if __name__ == "__main__":
             color="black",
             linestyle="--",
             linewidth=1,
-            label="Counter cycle" if n == 0 else None,
+            label="Counter Period" if n == 0 else None,
         )
 
     ax.set_xlim(0, 2.0 * FRAME_INTERVAL_MS + READOUT_TIME_MS)
