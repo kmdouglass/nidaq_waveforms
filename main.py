@@ -1,3 +1,4 @@
+import sys
 import time
 
 import matplotlib.pyplot as plt
@@ -7,12 +8,19 @@ import numpy as np
 
 
 # Script configuration
-MOCK_DAQ = True  # Set to True to use mock DAQ for testing without hardware
+MOCK_DAQ = False  # Set to True to use mock DAQ for testing without hardware
+MAKE_PLOT = False # Set to True to plot the waveform 
+FRAME_INTERVAL_MS = 50.0
+READOUT_TIME_MS = 22.94
+PARKING_FRACTION = 0.8
+EXPOSURE_PP_V = 0.46
+WAVEFORM_OFFSET_V = -0.075
+RATE_HZ = 50000
 
 # Hardware configuration
 COUNTER = "Dev1/ctr1"
-SOURCE_AO = "Dev1/Ctr1InternalOutput"
-TRIGGER_COUNTER = "Dev1/PFI3"
+SOURCE_AO = "/Dev1/Ctr1InternalOutput"
+TRIGGER_COUNTER = "/Dev1/PFI3"
 WAVEFORM_MIN_V = -10.0
 WAVEFORM_MAX_V = 10.0
 
@@ -192,21 +200,14 @@ if __name__ == "__main__":
             task.__enter__ = MagicMock(return_value=task)
             task.__exit__ = MagicMock(return_value=False)
             return task
-        
-    frame_interval_ms = 50.0
-    readout_time_ms = 22.94
-    parking_fraction = 0.8
-    exposure_pp_V = 0.46
-    waveform_offset_V = -0.075
-    rate_Hz = 50000
 
     results = main(
-        frame_interval_ms=frame_interval_ms,
-        readout_time_ms=readout_time_ms,
-        parking_fraction=parking_fraction,
-        exposure_pp_V=exposure_pp_V,
-        waveform_offset_V=waveform_offset_V,
-        rate_Hz=rate_Hz,
+        frame_interval_ms=FRAME_INTERVAL_MS,
+        readout_time_ms=READOUT_TIME_MS,
+        parking_fraction=PARKING_FRACTION,
+        exposure_pp_V=EXPOSURE_PP_V,
+        waveform_offset_V=WAVEFORM_OFFSET_V,
+        rate_Hz=RATE_HZ,
         task_class=make_fake_task if MOCK_DAQ else nidaqmx.Task,
     )
 
@@ -216,6 +217,9 @@ if __name__ == "__main__":
 
     #==============================================================================================
     # Plot the results
+    if not MAKE_PLOT:
+        sys.exit(0)
+    
     import matplotlib
     matplotlib.use("QtAgg")
 
@@ -235,8 +239,8 @@ if __name__ == "__main__":
     exposure_end_ms = exposure_start_ms + results["exposure_time_ms"]
     for n in range(0, 2):
         ax.axvspan(
-            exposure_start_ms + n * frame_interval_ms,
-            exposure_end_ms + n * frame_interval_ms,
+            exposure_start_ms + n * FRAME_INTERVAL_MS,
+            exposure_end_ms + n * FRAME_INTERVAL_MS,
             color="blue",
             alpha=0.3,
             label="Exposure" if n == 0 else None,
@@ -247,14 +251,14 @@ if __name__ == "__main__":
     readout_end_ms = readout_start_ms + results["readout_time_ms"]
     for n in range(0, 2):
         ax.axvspan(
-            readout_start_ms + n * frame_interval_ms,
-            readout_end_ms + n * frame_interval_ms,
+            readout_start_ms + n * FRAME_INTERVAL_MS,
+            readout_end_ms + n * FRAME_INTERVAL_MS,
             color="red",
             alpha=0.3,
             label="Readout" if n == 0 else None,
         )
 
-    ax.set_xlim(0, 2.0 * frame_interval_ms + readout_time_ms)
+    ax.set_xlim(0, 2.0 * FRAME_INTERVAL_MS + READOUT_TIME_MS)
     ax.set_xlabel("Time, ms")
     ax.set_ylabel("Voltage, V")
     ax.grid(True)
